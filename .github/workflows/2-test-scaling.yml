@@ -1,0 +1,131 @@
+name: 2 - Test Scaling
+
+on:
+  workflow_dispatch:
+    inputs:
+      stress_duration:
+        description: "Duration (seconds) to run CPU stress on initial instance"
+        required: false
+        default: "300"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    name: Trigger Scale-Out and Verify Web Servers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Show current ASG state
+        run: |
+          echo "=== Current ASG instances ==="
+          aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names web-asg-sean \
+            --query 'AutoScalingGroups[0].Instances[*].{
+              ID:InstanceId,State:LifecycleState,Health:HealthStatus}' \
+            --output table
+
+      - name: Get instance IDs in ASG
+        id: get_instances
+        run: |
+          IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names web-asg-sean \
+            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+            --output text)
+          echo "instance_ids=$IDS" >> "$GITHUB_OUTPUT"
+          echo "Instances in service: $IDS"
+
+      - name: Trigger CPU stress via SSM
+        if: steps.get_instances.outputs.instance_ids != ''
+        env:
+          DURATION: ${{ github.event.inputs.stress_duration }}
+        run: |
+          INSTANCE_ID=$(echo "${{ steps.get_instances.outputs.instance_ids }}" | awk '{print $1}')
+          echo "Running stress on $INSTANCE_ID for ${DURATION}s"
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"dnf install -y stress 2>/dev/null || true\", \"stress --cpu 4 --timeout ${DURATION} &\", \"echo Stress started\"]" \
+            --comment "Assignment 10: CPU stress test" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $CMD_ID"
+          sleep 10
+
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,Output:StandardOutputContent}' \
+            --output table
+
+      - name: Monitor scale-out (up to 5 minutes)
+        run: |
+          echo "Watching for new instance launch (CPU alarm triggers after ~60s of high CPU)…"
+          INITIAL_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names web-asg-sean \
+            --query 'length(AutoScalingGroups[0].Instances)' \
+            --output text)
+          echo "Initial instance count: $INITIAL_COUNT"
+
+          for i in $(seq 1 30); do
+            sleep 10
+            COUNT=$(aws autoscaling describe-auto-scaling-groups \
+              --auto-scaling-group-names web-asg-sean \
+              --query 'length(AutoScalingGroups[0].Instances)' \
+              --output text)
+            ALARM=$(aws cloudwatch describe-alarms \
+              --alarm-names web-asg-cpu-high-sean \
+              --query 'MetricAlarms[0].StateValue' \
+              --output text)
+            echo "  [$((i*10))s] Instances=$COUNT  Alarm=$ALARM"
+            if [ "$COUNT" -gt "$INITIAL_COUNT" ]; then
+              echo "  Scale-out detected! New instance count: $COUNT"
+              break
+            fi
+          done
+
+      - name: Show final ASG state
+        run: |
+          echo "=== Final ASG state ==="
+          aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names web-asg-sean \
+            --query 'AutoScalingGroups[0].Instances[*].{
+              ID:InstanceId,State:LifecycleState,Health:HealthStatus,AZ:AvailabilityZone}' \
+            --output table
+
+      - name: Get public IPs for manual web verification
+        run: |
+          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names web-asg-sean \
+            --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+            --output text)
+
+          echo "=== Public IPs (open in browser to verify web server) ==="
+          for ID in $INSTANCE_IDS; do
+            IP=$(aws ec2 describe-instances \
+              --instance-ids "$ID" \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text 2>/dev/null || echo "N/A")
+            echo "  $ID  →  http://$IP"
+          done
+
+      - name: Tail Lambda logs (last 50 events)
+        run: |
+          echo "=== Lambda lifecycle handler logs ==="
+          aws logs tail /aws/lambda/asg-lifecycle-handler-sean \
+            --since 30m \
+            --format short \
+            2>/dev/null || echo "(No log events in the last 30 minutes)"

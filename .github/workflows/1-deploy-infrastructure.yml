@@ -1,0 +1,67 @@
+name: 1 - Deploy Infrastructure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # Required for OIDC token
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy ASG Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Deploy infrastructure
+        run: python setup_infrastructure.py
+
+      - name: Show ASG status
+        run: |
+          echo "=== Auto Scaling Group ==="
+          aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names web-asg-sean \
+            --query 'AutoScalingGroups[0].{
+              ASG:AutoScalingGroupName,
+              Min:MinSize,Max:MaxSize,Desired:DesiredCapacity,
+              Instances:length(Instances)}' \
+            --output table
+
+      - name: Show lifecycle hook
+        run: |
+          echo "=== Lifecycle Hooks ==="
+          aws autoscaling describe-lifecycle-hooks \
+            --auto-scaling-group-name web-asg-sean \
+            --output table
+
+      - name: Show CloudWatch alarm
+        run: |
+          echo "=== CloudWatch Alarm ==="
+          aws cloudwatch describe-alarms \
+            --alarm-names web-asg-cpu-high-sean \
+            --query 'MetricAlarms[0].{
+              Alarm:AlarmName,State:StateValue,
+              Threshold:Threshold,Period:Period}' \
+            --output table
