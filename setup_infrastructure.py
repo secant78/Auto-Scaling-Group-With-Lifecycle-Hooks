@@ -124,7 +124,7 @@ def create_ec2_role():
         role = iam.create_role(
             RoleName=config.EC2_ROLE_NAME,
             AssumeRolePolicyDocument=json.dumps(trust),
-            Description="EC2 role for ASG instances — allows SSM",
+            Description="EC2 role for ASG instances - allows SSM",
         )
         print(f"  Created role: {config.EC2_ROLE_NAME}")
     except ClientError as e:
