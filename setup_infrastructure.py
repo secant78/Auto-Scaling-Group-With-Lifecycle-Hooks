@@ -262,43 +262,55 @@ def _zip_lambda():
 
 def create_lambda_function(lambda_role_arn):
     print("\n[4/10] Lambda function…")
-    # IAM role propagation can take a few seconds after creation
-    _wait(10, "IAM role propagation")
 
     code = _zip_lambda()
 
-    try:
-        resp = lambda_client.create_function(
-            FunctionName=config.LAMBDA_FUNCTION_NAME,
-            Runtime="python3.12",
-            Role=lambda_role_arn,
-            Handler="lifecycle_handler.lambda_handler",
-            Code={"ZipFile": code},
-            Timeout=config.LAMBDA_TIMEOUT,
-            MemorySize=256,
-            Description="ASG lifecycle hook: installs httpd via SSM on new EC2 instances",
-        )
-        fn_arn = resp["FunctionArn"]
-        print(f"  Created: {fn_arn}")
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "ResourceConflictException":
-            # Already exists — update code + config
-            lambda_client.update_function_code(
+    # IAM role propagation can take up to ~30s; retry until Lambda accepts it.
+    fn_arn = None
+    for attempt in range(1, 13):  # up to ~60s
+        try:
+            resp = lambda_client.create_function(
                 FunctionName=config.LAMBDA_FUNCTION_NAME,
-                ZipFile=code,
-            )
-            lambda_client.update_function_configuration(
-                FunctionName=config.LAMBDA_FUNCTION_NAME,
+                Runtime="python3.12",
                 Role=lambda_role_arn,
+                Handler="lifecycle_handler.lambda_handler",
+                Code={"ZipFile": code},
                 Timeout=config.LAMBDA_TIMEOUT,
                 MemorySize=256,
+                Description="ASG lifecycle hook: installs httpd via SSM on new EC2 instances",
             )
-            fn_arn = lambda_client.get_function_configuration(
-                FunctionName=config.LAMBDA_FUNCTION_NAME
-            )["FunctionArn"]
-            print(f"  Updated existing function: {fn_arn}")
-        else:
-            raise
+            fn_arn = resp["FunctionArn"]
+            print(f"  Created: {fn_arn}")
+            break
+        except lambda_client.exceptions.InvalidParameterValueException as e:
+            if "cannot be assumed" in str(e):
+                print(f"  IAM role not ready yet (attempt {attempt}/12), waiting 5s…")
+                time.sleep(5)
+            else:
+                raise
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ResourceConflictException":
+                # Already exists — update code + config
+                lambda_client.update_function_code(
+                    FunctionName=config.LAMBDA_FUNCTION_NAME,
+                    ZipFile=code,
+                )
+                lambda_client.update_function_configuration(
+                    FunctionName=config.LAMBDA_FUNCTION_NAME,
+                    Role=lambda_role_arn,
+                    Timeout=config.LAMBDA_TIMEOUT,
+                    MemorySize=256,
+                )
+                fn_arn = lambda_client.get_function_configuration(
+                    FunctionName=config.LAMBDA_FUNCTION_NAME
+                )["FunctionArn"]
+                print(f"  Updated existing function: {fn_arn}")
+                break
+            else:
+                raise
+
+    if fn_arn is None:
+        raise RuntimeError("Lambda creation failed: IAM role never became assumable after 60s")
 
     return fn_arn
 
