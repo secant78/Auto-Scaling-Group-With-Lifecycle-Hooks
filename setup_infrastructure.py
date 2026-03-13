@@ -75,7 +75,7 @@ def create_security_group():
 
     sg = ec2_client.create_security_group(
         GroupName=config.SECURITY_GROUP_NAME,
-        Description="ASG lifecycle hooks demo — HTTP inbound",
+        Description="ASG lifecycle hooks demo - HTTP inbound",
         VpcId=vpc_id,
         TagSpecifications=[{"ResourceType": "security-group", "Tags": _tag(config.SECURITY_GROUP_NAME)}],
     )
