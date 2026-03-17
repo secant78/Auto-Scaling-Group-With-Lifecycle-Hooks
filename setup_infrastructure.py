@@ -290,10 +290,14 @@ def create_lambda_function(lambda_role_arn):
                 raise
         except ClientError as e:
             if e.response["Error"]["Code"] == "ResourceConflictException":
-                # Already exists — update code + config
+                # Already exists — update code + config, waiting between calls
                 lambda_client.update_function_code(
                     FunctionName=config.LAMBDA_FUNCTION_NAME,
                     ZipFile=code,
+                )
+                # Wait for the code update to complete before updating config
+                lambda_client.get_waiter("function_updated").wait(
+                    FunctionName=config.LAMBDA_FUNCTION_NAME
                 )
                 lambda_client.update_function_configuration(
                     FunctionName=config.LAMBDA_FUNCTION_NAME,
